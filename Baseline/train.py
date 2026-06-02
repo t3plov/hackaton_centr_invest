@@ -1,6 +1,7 @@
 import pandas as pd
 from pathlib import Path
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.multioutput import MultiOutputClassifier
 from sklearn.preprocessing import StandardScaler
 import joblib
 
@@ -22,19 +23,17 @@ def load_data():
 def train_models(X, y):
     models = {}
     for idx, prod in enumerate(PRODUCTS):
-        clf = RandomForestClassifier(
-            n_estimators=350,
-            max_depth=8,
-            min_samples_split=5,
-            max_features='log2',
-            min_samples_leaf=3,
-            class_weight=None,
-            n_jobs=-1,
+        hgb = HistGradientBoostingClassifier(
+            max_iter=300,
+            learning_rate=0.01,
+            max_depth=11,
+            min_samples_leaf=5,
+            l2_regularization=0.1,
             random_state=42,
-            verbose=0
+            verbose=1
         )
-        clf.fit(X, y[:, idx])
-        models[prod] = clf
+        hgb.fit(X, y[:, idx])
+        models[prod] = hgb
     return models
 
 if __name__ == "__main__":
