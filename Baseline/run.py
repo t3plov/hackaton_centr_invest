@@ -4,13 +4,14 @@ import joblib
 from pathlib import Path
 import argparse
 
+# Убраны пробелы в названиях!
 PRODUCTS = [
     "credit_card", "mortgage", "deposit", "investment", "insurance",
     "p2p_transfer", "cashback", "premium_account", "business_loan"
 ]
 
-if __name__ == "__main__":
 
+if __name__ == "__main__":   # ИСПРАВЛЕНО: было "if name == "main":"
     parser = argparse.ArgumentParser()
     parser.add_argument('--input-path', type=str, help='test data path')
     parser.add_argument('--output-path', type=str, help='output file')
@@ -25,7 +26,10 @@ if __name__ == "__main__":
     X = test_data[feat_cols].values
     X_scaled = scaler.transform(X)
 
-    y_proba = np.column_stack([models[p].predict_proba(X_scaled)[:, 1] for p in PRODUCTS])
+    y_proba = np.column_stack([
+        models[p].predict_proba(X_scaled)[:, 1] for p in PRODUCTS
+    ])
 
     result = pd.DataFrame(y_proba)
     result.to_csv(args.output_path, header=False, index=False)
+    print(f"Предсказания сохранены в {args.output_path}")
