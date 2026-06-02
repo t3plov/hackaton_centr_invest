@@ -25,9 +25,9 @@ def train_models(X, y):
     for idx, prod in enumerate(PRODUCTS):
         hgb = HistGradientBoostingClassifier(
             max_iter=500,
-            learning_rate=0.01,
-            max_depth=11,
-            min_samples_leaf=5,
+            learning_rate=0.05,
+            max_depth=8,
+            min_samples_leaf=20,
             l2_regularization=0.1,
             random_state=42,
             verbose=1
