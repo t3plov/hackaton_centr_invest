@@ -17,7 +17,7 @@ if __name__ == "__main__":
 
     test_data = pd.read_csv(args.input_path)
 
-    pack = joblib.load(Path("Baseline/baseline_model.joblib"))
+    pack = joblib.load(Path("baseline_model.joblib"))
     scaler = pack["scaler"]
     feat_cols = pack["feature_columns"]
     models = pack["models"]
