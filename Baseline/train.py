@@ -1,7 +1,8 @@
 import pandas as pd
+import numpy as np
 from pathlib import Path
 from sklearn.preprocessing import StandardScaler
-from lightgbm import LGBMClassifier
+from sklearn.linear_model import LogisticRegression
 import joblib
 
 PRODUCTS = [
@@ -9,50 +10,53 @@ PRODUCTS = [
     "p2p_transfer", "cashback", "premium_account", "business_loan"
 ]
 
+BEST_PARAMS = {
+    "credit_card": {'C': 0.1, 'penalty': 'l1', 'solver': 'saga', 'max_iter': 300, 'l1_ratio': 0.5},
+    "mortgage": {'C': 0.1, 'penalty': 'l1', 'solver': 'saga', 'max_iter': 300, 'l1_ratio': 0.5},
+    "deposit": {'C': 0.1, 'penalty': 'l1', 'solver': 'saga', 'max_iter': 300, 'l1_ratio': 0.5},
+    "investment": {'C': 0.1, 'penalty': 'l1', 'solver': 'saga', 'max_iter': 300, 'l1_ratio': 0.5},
+    "insurance": {'C': 0.1, 'penalty': 'l1', 'solver': 'saga', 'max_iter': 300, 'l1_ratio': 0.5},
+    "p2p_transfer": {'C': 1.0, 'penalty': 'l1', 'solver': 'saga', 'max_iter': 300, 'l1_ratio': 0.5},
+    "cashback": {'C': 0.1, 'penalty': None, 'solver': 'lbfgs', 'max_iter': 300, 'l1_ratio': 0.5},
+    "premium_account": {'C': 0.1, 'penalty': 'l1', 'solver': 'saga', 'max_iter': 300, 'l1_ratio': 0.5},
+    "business_loan": {'C': 0.1, 'penalty': None, 'solver': 'sag', 'max_iter': 300, 'l1_ratio': 0.5}
+}
 
-def load_data():
+
+def load_and_prepare_data():
     train_path = Path("./train_data.csv")
     df = pd.read_csv(train_path)
 
-    feature_cols = [
-        c for c in df.columns
-        if c not in ["user_id"] + [f"product_{p}" for p in PRODUCTS]
-    ]
+    target_cols = [f"product_{p}" for p in PRODUCTS]
+    feature_cols = [c for c in df.columns if c not in ["user_id"] + target_cols]
+
     X = df[feature_cols].copy()
+    y = df[target_cols].values
+
+    for col in ['has_child', 'is_salary_client']:
+        if col in X.columns:
+            X[col] = X[col].astype(int)
 
     scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
+    X[['age', 'tenure_months', 'tx_count_30d', 'avg_tx_amount']] = scaler.fit_transform(X[['age', 'tenure_months', 'tx_count_30d', 'avg_tx_amount']])
 
-    y = df[[f"product_{p}" for p in PRODUCTS]].values
-    return X_scaled, y, scaler, feature_cols
+    return X, y, scaler, feature_cols
 
 
 def train_models(X, y):
     models = {}
-    for idx, prod in enumerate(PRODUCTS):
-        print(f"Обучение модели для: {prod}")
 
-        lgbm = LGBMClassifier(
-            n_estimators=500,
-            learning_rate=0.01,
-            max_depth=-1,
-            num_leaves=7,
-            subsample=0.8,
-            eval_metric='auc',
-            objective='binary',
-            min_child_samples=30,
-            is_unbalance=True,
-            verbose=-1,
-            random_state=42,
-            n_jobs=-1
-        )
-        lgbm.fit(X, y[:, idx])
-        models[prod] = lgbm
+    for idx, prod in enumerate(PRODUCTS):
+        lr = LogisticRegression(**BEST_PARAMS[prod], random_state=42)
+        lr.fit(X, y[:, idx])
+
+        models[prod] = lr
+
     return models
 
 
-if __name__ == "__main__":   # ИСПРАВЛЕНО: было "if name == "main":"
-    X, y, scaler, feat_cols = load_data()
+if __name__ == "__main__":
+    X, y, scaler, feat_cols = load_and_prepare_data()
 
     models = train_models(X, y)
 
@@ -61,4 +65,6 @@ if __name__ == "__main__":   # ИСПРАВЛЕНО: было "if name == "main"
         "feature_columns": feat_cols,
         "models": models,
     }
-    joblib.dump(model_pack, Path("./baseline_model.joblib"))
+
+    output_path = Path("./baseline_model.joblib")
+    joblib.dump(model_pack, output_path)
