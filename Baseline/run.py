@@ -6,6 +6,8 @@ import argparse
 
 def build_features(df):
     df['das_income_bucket'] = df['digital_activity_score'] ** (df['income_bucket'] + 1)
+    is_bad_rows = df.loc[df['avg_tx_amount'] > 500].index
+    df.drop(is_bad_rows, axis=0, inplace=True)
     df['avg_tx_amount'] = np.log(df['avg_tx_amount'])
 
     return df
