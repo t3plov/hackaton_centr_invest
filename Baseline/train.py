@@ -2,225 +2,150 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 import joblib
+from sklearn.cluster import KMeans
+from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
-from catboost import CatBoostClassifier, Pool
+from sklearn.metrics import roc_auc_score
 
 PRODUCTS = [
     "credit_card", "mortgage", "deposit", "investment", "insurance",
     "p2p_transfer", "cashback", "premium_account", "business_loan"
 ]
 
+
 def load_and_prepare_data():
     train_path = Path("./train_data.csv")
     df = pd.read_csv(train_path)
 
-    df['das_income_bucket'] = df['digital_activity_score'] ** (df['income_bucket'] + 1)
+    if 'user_id' in df.columns:
+        df.drop('user_id', axis=1, inplace=True)
 
-    bins = [0, 50, 200, 500, float('inf')]
-    labels = ['tx_low', 'tx_medium', 'tx_high', 'tx_very_high']
-    df['avg_tx_amount_bin'] = pd.cut(df['avg_tx_amount'], bins=bins, labels=labels, right=False)
-    df = pd.get_dummies(df, columns=['avg_tx_amount_bin'], drop_first=False)
-    df.drop('avg_tx_amount', axis=1, inplace=True)
+    # 1. Клиппинг и логарифмирование avg_tx_amount
+    upper_limit = df['avg_tx_amount'].quantile(0.99)
+    df['avg_tx_amount'] = np.clip(df['avg_tx_amount'], a_min=0, a_max=upper_limit)
+    df['avg_tx_amount'] = np.log1p(df['avg_tx_amount'])  # log1p безопаснее для нулей
 
-
-
+    # 2. Определяем таргеты
     target_cols = [f"product_{p}" for p in PRODUCTS]
-    feature_cols = [c for c in df.columns if c not in ["user_id"] + target_cols]
 
-    X = df[feature_cols].copy()
-    y = df[target_cols].copy()
+    # 3. Первый скейлер — для кластеризации
+    cols_to_scale_1 = [col for col in df.columns
+                       if col not in target_cols + ['has_child', 'is_salary_client']]
 
-    for col in ['has_child', 'is_salary_client', 'avg_tx_amount_bin_tx_low', 'avg_tx_amount_bin_tx_medium',
-                'avg_tx_amount_bin_tx_high', 'avg_tx_amount_bin_tx_very_high']:
-        X[col] = X[col].astype(int)
+    scaler1 = StandardScaler()
+    X_for_kmeans = scaler1.fit_transform(df[cols_to_scale_1])
 
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X[[col for col in X.columns if col not in ['has_child', 'is_salary_client', 'avg_tx_amount_bin_tx_low', 'avg_tx_amount_bin_tx_medium',
-           'avg_tx_amount_bin_tx_high', 'avg_tx_amount_bin_tx_very_high']]])
-    X_binary = X[['has_child', 'is_salary_client', 'avg_tx_amount_bin_tx_low', 'avg_tx_amount_bin_tx_medium',
-           'avg_tx_amount_bin_tx_high', 'avg_tx_amount_bin_tx_very_high']].values
-    X_scaled = np.hstack([X_scaled, X_binary])
+    # Бинарные признаки для склейки
+    binary_cols_1 = ['has_child', 'is_salary_client']
+    X_binary_1 = df[binary_cols_1].values
+    X_for_kmeans = np.hstack([X_for_kmeans, X_binary_1])
 
-    return X, X_scaled, y, feature_cols, target_cols, scaler
+    # 4. Кластеризация
+    kmeans = KMeans(n_clusters=5, random_state=42, n_init=10)
+    df['client_cluster'] = kmeans.fit_predict(X_for_kmeans)
+
+    # 5. One-Hot Encoding кластеров
+    df = pd.get_dummies(
+        df,
+        columns=['client_cluster'],
+        prefix='cluster',
+        drop_first=True
+    )
+
+    # Приводим к int
+    for col in ['cluster_1', 'cluster_2', 'cluster_3', 'cluster_4']:
+        if col in df.columns:
+            df[col] = df[col].astype(int)
+
+    # 6. Финальные признаки и таргеты
+    features = [col for col in df.columns if col not in target_cols]
+    X = df[features]
+    y = df[target_cols]
+
+    # 7. Второй скейлер — финальный
+    binary_cols_2 = ['cluster_1', 'cluster_2', 'cluster_3', 'cluster_4',
+                     'has_child', 'is_salary_client']
+    cols_to_scale_2 = [col for col in X.columns if col not in binary_cols_2]
+
+    scaler2 = StandardScaler()
+    X_scaled = scaler2.fit_transform(X[cols_to_scale_2])
+    X_binary_2 = X[binary_cols_2].values
+    X_final = np.hstack([X_scaled, X_binary_2])
+
+    # 8. Разбиение
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_final, y, test_size=0.2, random_state=42
+    )
+
+    return (X_train, y_train, X_test, y_test, features, target_cols,
+            scaler1, scaler2, kmeans, upper_limit, cols_to_scale_1, cols_to_scale_2,
+            binary_cols_1, binary_cols_2)
 
 
-def train_models(X, X_scaled, y):
+def train_models(X_train, y_train, target_cols):
     models = {}
-    cat_features = ['has_child', 'is_salary_client', 'avg_tx_amount_bin_tx_low', 'avg_tx_amount_bin_tx_medium',
-                    'avg_tx_amount_bin_tx_high',
-                    'avg_tx_amount_bin_tx_very_high']
+    auc_scores = {}
 
-    model_product_credit_card = LogisticRegression(
-        solver='saga',
-        l1_ratio=0.8,
-        C=2.5,
-        max_iter=200,
-        random_state=42,
-        class_weight='balanced'
-    )
-    model_product_credit_card.fit(X_scaled, y['product_credit_card'])
-    models['product_credit_card'] = model_product_credit_card
+    for col in target_cols:
+        print(f"Обучение LR {col}")
+        model = LogisticRegression(
+            solver='saga',  # saga поддерживает l1_ratio
+            penalty='elasticnet',
+            l1_ratio=0.8,
+            C=5.0,
+            max_iter=200,
+            random_state=42,
+            class_weight='balanced'
+        )
+        model.fit(X_train, y_train[col])
+        models[col] = model
 
+        preds = model.predict_proba(X_train)[:, 1]
+        auc = roc_auc_score(y_train[col], preds)
+        auc_scores[col] = auc
+        print(f"  Train AUC: {auc:.5f}")
 
-    catboost_params = {
-        'iterations': 800,
-        'learning_rate': 0.01,
-        'depth': 8,
-        'loss_function': 'Logloss',
-        'random_seed': 42,
-        'l2_leaf_reg': 6.0,
-        'min_data_in_leaf': 50,
-        'verbose': False,
-    }
-    model_product_mortgage = CatBoostClassifier(**catboost_params)
-    train_pool = Pool(
-        X,
-        y['product_mortgage'],
-        cat_features=cat_features if cat_features else None
-    )
-    model_product_mortgage.fit(train_pool)
-    models['product_mortgage'] = model_product_mortgage
+    return models, auc_scores
 
-
-    catboost_params = {
-        'iterations': 600,
-        'learning_rate': 0.05,
-        'depth': 3,
-        'loss_function': 'Logloss',
-        'random_seed': 42,
-        'l2_leaf_reg': 1.0,
-        'verbose': False,
-    }
-    model_product_deposit = CatBoostClassifier(**catboost_params)
-    train_pool = Pool(
-        X,
-        y['product_deposit'],
-        cat_features=cat_features if cat_features else None
-    )
-    model_product_deposit.fit(train_pool)
-    models['product_deposit'] = model_product_deposit
-
-
-    catboost_params = {
-        'iterations': 600,
-        'learning_rate': 0.03,
-        'depth': 2,
-        'loss_function': 'Logloss',
-        'random_seed': 42,
-        'l2_leaf_reg': 1.0,
-        'verbose': False,
-    }
-    model_product_investment = CatBoostClassifier(**catboost_params)
-    train_pool = Pool(
-        X,
-        y['product_investment'],
-        cat_features=cat_features if cat_features else None
-    )
-    model_product_investment.fit(train_pool)
-    models['product_investment'] = model_product_investment
-
-
-    catboost_params = {
-        'iterations': 500,
-        'learning_rate': 0.005,
-        'depth': 2,
-        'loss_function': 'Logloss',
-        'random_seed': 42,
-        'l2_leaf_reg': 2.0,
-        'verbose': False,
-    }
-    model_product_insurance = CatBoostClassifier(**catboost_params)
-    train_pool = Pool(
-        X,
-        y['product_insurance'],
-        cat_features=cat_features if cat_features else None
-    )
-    model_product_insurance.fit(train_pool)
-    models['product_insurance'] = model_product_insurance
-
-
-    catboost_params = {
-        'iterations': 500,
-        'learning_rate': 0.05,
-        'depth': 2,
-        'loss_function': 'Logloss',
-        'random_seed': 42,
-        'l2_leaf_reg': 0.8,
-        'verbose': False,
-    }
-    model_product_p2p_transfer = CatBoostClassifier(**catboost_params)
-    train_pool = Pool(
-        X,
-        y['product_p2p_transfer'],
-        cat_features=cat_features if cat_features else None
-    )
-    model_product_p2p_transfer.fit(train_pool)
-    models['product_p2p_transfer'] = model_product_p2p_transfer
-
-
-    model_product_cashback = LogisticRegression(
-        solver='newton-cg',
-        l1_ratio=0.0,
-        C=1.5,
-        max_iter=100,
-        random_state=42,
-        class_weight='balanced'
-    )
-    model_product_cashback.fit(X_scaled, y['product_cashback'])
-    models['product_cashback'] = model_product_cashback
-
-
-    catboost_params = {
-        'iterations': 900,
-        'learning_rate': 0.05,
-        'depth': 2,
-        'loss_function': 'Logloss',
-        'random_seed': 42,
-        'l2_leaf_reg': 0.8,
-        'verbose': False,
-    }
-    model_product_premium_account = CatBoostClassifier(**catboost_params)
-    train_pool = Pool(
-        X,
-        y['product_premium_account'],
-        cat_features=cat_features if cat_features else None
-    )
-    model_product_premium_account.fit(train_pool)
-    models['product_premium_account'] = model_product_premium_account
-
-
-    catboost_params = {
-        'iterations': 500,
-        'learning_rate': 0.01,
-        'depth': 2,
-        'loss_function': 'Logloss',
-        'random_seed': 42,
-        'l2_leaf_reg': 0.6,
-        'verbose': False,
-    }
-    model_product_business_loan = CatBoostClassifier(**catboost_params)
-    train_pool = Pool(
-        X,
-        y['product_business_loan'],
-        cat_features=cat_features if cat_features else None
-    )
-    model_product_business_loan.fit(train_pool)
-    models['product_business_loan'] = model_product_business_loan
-
-
-    return models
 
 if __name__ == "__main__":
-    X, X_scaled, y, feat_cols, target_cols, scaler = load_and_prepare_data()
+    (X_train, y_train, X_test, y_test, features, target_cols,
+     scaler1, scaler2, kmeans, upper_limit,
+     cols_to_scale_1, cols_to_scale_2,
+     binary_cols_1, binary_cols_2) = load_and_prepare_data()
 
-    models = train_models(X, X_scaled, y)
+    models, auc_scores = train_models(X_train, y_train, target_cols)
 
+    # Оценка на тесте
+    print("\n" + "=" * 60)
+    print("РЕЗУЛЬТАТЫ НА ТЕСТЕ:")
+    print("=" * 60)
+    test_auc_scores = {}
+    for col in target_cols:
+        preds = models[col].predict_proba(X_test)[:, 1]
+        auc = roc_auc_score(y_test[col], preds)
+        test_auc_scores[col] = auc
+        print(f"  {col}: {auc:.5f}")
+
+    macro_auc = np.mean(list(test_auc_scores.values()))
+    print(f"\nMACRO ROC-AUC: {macro_auc:.5f}")
+
+    # Сохраняем ВСЁ необходимое для инференса
     model_pack = {
-        "feature_columns": feat_cols,
-        "model": models,
-        "scaler": scaler
+        "feature_columns": features,
+        "target_columns": target_cols,
+        "models": models,
+        "scaler1": scaler1,
+        "scaler2": scaler2,
+        "kmeans": kmeans,
+        "upper_limit": upper_limit,
+        "cols_to_scale_1": cols_to_scale_1,
+        "cols_to_scale_2": cols_to_scale_2,
+        "binary_cols_1": binary_cols_1,
+        "binary_cols_2": binary_cols_2,
     }
 
     output_path = Path("./baseline_model.joblib")
     joblib.dump(model_pack, output_path)
+    print(f"\nМодель сохранена в {output_path}")
