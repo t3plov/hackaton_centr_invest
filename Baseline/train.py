@@ -20,6 +20,8 @@ def load_and_prepare_data():
         df.drop('user_id', axis=1, inplace=True)
     bad_rows = df.loc[df['avg_tx_amount'] > 1000].index
     df.drop(bad_rows, axis=0, inplace=True)
+    bad_rows = df.loc[df['digital_activity_score'] > 0.8043961733674306].index
+    df.drop(bad_rows, axis=0, inplace=True)
 
     df['avg_tx_amount'] = np.log1p(df['avg_tx_amount'])
 
