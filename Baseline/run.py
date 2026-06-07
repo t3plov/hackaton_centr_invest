@@ -12,16 +12,10 @@ def build_features(df, pack):
     if 'user_id' in df.columns:
         df = df.drop('user_id', axis=1)
 
-    df['avg_tx_amount'] = np.log1p(df['avg_tx_amount'])
+    df['avg_tx_amount'] = np.log10(df['avg_tx_amount'])
 
-    encoder = pack["encoder"]
-    income_encoded = encoder.transform(df[['income_bucket']])
-    income_columns = encoder.get_feature_names_out(['income_bucket'])
-    income_df = pd.DataFrame(income_encoded, columns=income_columns, index=df.index)
-    df = df.drop('income_bucket', axis=1)
-    df = pd.concat([df, income_df], axis=1)
 
-    for col in ['has_child', 'is_salary_client', 'income_bucket_1', 'income_bucket_2', 'income_bucket_3']:
+    for col in ['has_child', 'is_salary_client']:
         df[col] = df[col].astype(int)
 
     scaler = pack["scaler"]
@@ -30,7 +24,7 @@ def build_features(df, pack):
     X = df[features]
 
     cols_to_scale = [col for col in features if col not in
-                     ['has_child', 'is_salary_client', 'income_bucket_1', 'income_bucket_2', 'income_bucket_3']]
+                     ['has_child', 'is_salary_client']]
     X[cols_to_scale] = scaler.transform(df[cols_to_scale])
 
 
