@@ -2,11 +2,8 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 import joblib
-from sklearn.cluster import KMeans
-from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LogisticRegression
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import roc_auc_score
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
 
 PRODUCTS = [
     "credit_card", "mortgage", "deposit", "investment", "insurance",
@@ -21,68 +18,40 @@ def load_and_prepare_data():
 
     if 'user_id' in df.columns:
         df.drop('user_id', axis=1, inplace=True)
+    bad_rows = df.loc[df['avg_tx_amount'] > 1000].index
+    df.drop(bad_rows, axis=0, inplace=True)
 
-    # 1. Клиппинг и логарифмирование avg_tx_amount
-    upper_limit = df['avg_tx_amount'].quantile(0.95)
-    df['avg_tx_amount'] = np.clip(df['avg_tx_amount'], a_min=0, a_max=upper_limit)
     df['avg_tx_amount'] = np.log1p(df['avg_tx_amount'])
+
+    encoder = OneHotEncoder(drop='first', sparse_output=False)
+    income_encoded = encoder.fit_transform(df[['income_bucket']])
+    income_columns = encoder.get_feature_names_out(['income_bucket'])
+    income_df = pd.DataFrame(income_encoded, columns=income_columns, index=df.index)
+    df = df.drop('income_bucket', axis=1)
+    df = pd.concat([df, income_df], axis=1)
 
     # 2. Определяем таргеты
     target_cols = [f"product_{p}" for p in PRODUCTS]
 
-    # 3. Первый скейлер — для кластеризации
-    cols_to_scale_1 = [col for col in df.columns
-                       if col not in target_cols + ['has_child', 'is_salary_client']]
+    cols_to_scale = [col for col in df.columns
+                       if col not in target_cols + ['has_child', 'is_salary_client', 'income_bucket_1', 'income_bucket_2', 'income_bucket_3']]
 
-    scaler1 = StandardScaler()
-    X_for_kmeans = scaler1.fit_transform(df[cols_to_scale_1])
+    scaler = StandardScaler()
+    df[cols_to_scale] = scaler.fit_transform(df[cols_to_scale])
 
-    # Бинарные признаки для склейки
-    binary_cols_1 = ['has_child', 'is_salary_client']
-    X_binary_1 = df[binary_cols_1].values
-    X_for_kmeans = np.hstack([X_for_kmeans, X_binary_1])
+    for col in ['has_child', 'is_salary_client', 'income_bucket_1', 'income_bucket_2', 'income_bucket_3']:
+        df[col] = df[col].astype(int)
 
-    # 4. Кластеризация
-    kmeans = KMeans(n_clusters=5, random_state=42, n_init=10)
-    df['client_cluster'] = kmeans.fit_predict(X_for_kmeans)
-
-    # 5. One-Hot Encoding кластеров
-    df = pd.get_dummies(
-        df,
-        columns=['client_cluster'],
-        prefix='cluster',
-        drop_first=True
-    )
-
-    # Приводим к int
-    for col in ['cluster_1', 'cluster_2', 'cluster_3', 'cluster_4']:
-        if col in df.columns:
-            df[col] = df[col].astype(int)
-
-    # 6. Финальные признаки и таргеты
     features = [col for col in df.columns if col not in target_cols]
     X = df[features]
     y = df[target_cols]
 
-    # 7. Второй скейлер — финальный
-    binary_cols_2 = ['cluster_1', 'cluster_2', 'cluster_3', 'cluster_4',
-                     'has_child', 'is_salary_client']
-    cols_to_scale_2 = [col for col in X.columns if col not in binary_cols_2]
-
-    scaler2 = StandardScaler()
-    X_scaled = scaler2.fit_transform(X[cols_to_scale_2])
-    X_binary_2 = X[binary_cols_2].values
-    X = np.hstack([X_scaled, X_binary_2])
-
-
     return (X, y, features, target_cols,
-            scaler1, scaler2, kmeans, upper_limit, cols_to_scale_1, cols_to_scale_2,
-            binary_cols_1, binary_cols_2)
+            scaler, encoder)
 
 
 def train_models(X, y, target_cols):
     models = {}
-    auc_scores = {}
 
     for col in target_cols:
         print(f"Обучение LR {col}")
@@ -99,29 +68,20 @@ def train_models(X, y, target_cols):
         models[col] = model
 
 
-    return models, auc_scores
+    return models
 
 
 if __name__ == "__main__":
-    (X, y, features, target_cols,
-     scaler1, scaler2, kmeans, upper_limit,
-     cols_to_scale_1, cols_to_scale_2,
-     binary_cols_1, binary_cols_2) = load_and_prepare_data()
+    (X, y, features, target_cols, scaler, encoder) = load_and_prepare_data()
 
-    models, auc_scores = train_models(X, y, target_cols)
+    models = train_models(X, y, target_cols)
 
     model_pack = {
         "feature_columns": features,
         "target_columns": target_cols,
         "models": models,
-        "scaler1": scaler1,
-        "scaler2": scaler2,
-        "kmeans": kmeans,
-        "upper_limit": upper_limit,
-        "cols_to_scale_1": cols_to_scale_1,
-        "cols_to_scale_2": cols_to_scale_2,
-        "binary_cols_1": binary_cols_1,
-        "binary_cols_2": binary_cols_2,
+        "scaler": scaler,
+        "encoder": encoder
     }
 
     output_path = Path("./baseline_model.joblib")
