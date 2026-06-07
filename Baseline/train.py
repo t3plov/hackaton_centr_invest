@@ -16,15 +16,16 @@ PRODUCTS = [
 
 def load_and_prepare_data():
     train_path = Path("./train_data.csv")
-    df = pd.read_csv(train_path)
+    df = pd.read_csv(train_path, skipfooter=700, engine='python')
+    print(df.shape)
 
     if 'user_id' in df.columns:
         df.drop('user_id', axis=1, inplace=True)
 
     # 1. Клиппинг и логарифмирование avg_tx_amount
-    upper_limit = df['avg_tx_amount'].quantile(0.99)
+    upper_limit = df['avg_tx_amount'].quantile(0.95)
     df['avg_tx_amount'] = np.clip(df['avg_tx_amount'], a_min=0, a_max=upper_limit)
-    df['avg_tx_amount'] = np.log1p(df['avg_tx_amount'])  # log1p безопаснее для нулей
+    df['avg_tx_amount'] = np.log1p(df['avg_tx_amount'])
 
     # 2. Определяем таргеты
     target_cols = [f"product_{p}" for p in PRODUCTS]
@@ -71,67 +72,44 @@ def load_and_prepare_data():
     scaler2 = StandardScaler()
     X_scaled = scaler2.fit_transform(X[cols_to_scale_2])
     X_binary_2 = X[binary_cols_2].values
-    X_final = np.hstack([X_scaled, X_binary_2])
+    X = np.hstack([X_scaled, X_binary_2])
 
-    # 8. Разбиение
-    X_train, X_test, y_train, y_test = train_test_split(
-        X_final, y, test_size=0.2, random_state=42
-    )
 
-    return (X_train, y_train, X_test, y_test, features, target_cols,
+    return (X, y, features, target_cols,
             scaler1, scaler2, kmeans, upper_limit, cols_to_scale_1, cols_to_scale_2,
             binary_cols_1, binary_cols_2)
 
 
-def train_models(X_train, y_train, target_cols):
+def train_models(X, y, target_cols):
     models = {}
     auc_scores = {}
 
     for col in target_cols:
         print(f"Обучение LR {col}")
         model = LogisticRegression(
-            solver='saga',  # saga поддерживает l1_ratio
+            solver='saga',
             penalty='elasticnet',
             l1_ratio=0.8,
-            C=5.0,
-            max_iter=200,
+            C=0.01,
+            max_iter=150,
             random_state=42,
-            class_weight='balanced'
+            class_weight=None
         )
-        model.fit(X_train, y_train[col])
+        model.fit(X, y[col])
         models[col] = model
 
-        preds = model.predict_proba(X_train)[:, 1]
-        auc = roc_auc_score(y_train[col], preds)
-        auc_scores[col] = auc
-        print(f"  Train AUC: {auc:.5f}")
 
     return models, auc_scores
 
 
 if __name__ == "__main__":
-    (X_train, y_train, X_test, y_test, features, target_cols,
+    (X, y, features, target_cols,
      scaler1, scaler2, kmeans, upper_limit,
      cols_to_scale_1, cols_to_scale_2,
      binary_cols_1, binary_cols_2) = load_and_prepare_data()
 
-    models, auc_scores = train_models(X_train, y_train, target_cols)
+    models, auc_scores = train_models(X, y, target_cols)
 
-    # Оценка на тесте
-    print("\n" + "=" * 60)
-    print("РЕЗУЛЬТАТЫ НА ТЕСТЕ:")
-    print("=" * 60)
-    test_auc_scores = {}
-    for col in target_cols:
-        preds = models[col].predict_proba(X_test)[:, 1]
-        auc = roc_auc_score(y_test[col], preds)
-        test_auc_scores[col] = auc
-        print(f"  {col}: {auc:.5f}")
-
-    macro_auc = np.mean(list(test_auc_scores.values()))
-    print(f"\nMACRO ROC-AUC: {macro_auc:.5f}")
-
-    # Сохраняем ВСЁ необходимое для инференса
     model_pack = {
         "feature_columns": features,
         "target_columns": target_cols,
